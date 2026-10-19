@@ -14,10 +14,12 @@ Lisenok-FunPay — бот для FunPay с уведомлениями прода
          2-й «+от» -> «всё, что осталось — оплатить заказ и прислать ссылку/username»
   3) Покупатель пишет «+позвать» — покупателю: «продавец скоро придёт, ожидайте 2-3 мин»,
      продавцу в ВК: «вас вызывают (<ссылка на чат>)».
-  4) После того как покупателя попросили оплатить, он присылает ссылку/username —
-     продавцу в ВК: «юзер оплатил заказ начните выполнять».
-  5) Бот бесконечно слушает FunPay и сам восстанавливается после сбоев сети,
-     поэтому работает круглосуточно, пока запущен.
+  4) Когда FunPay присылает системное уведомление о новом оплаченном заказе,
+      продавцу в ВК: «юзер оплатил заказ начните выполнять» + ссылка на чат.
+      Сообщения покупателя на этом шаге больше не считаются оплатой.
+  5) Бот сам поднимает ваши предложения (лоты) на FunPay раз в 4 часа.
+  6) Бот бесконечно слушает FunPay и сам восстанавливается после сбоев сети,
+      поэтому работает круглосуточно, пока запущен.
 
 =====================================================================
   КУДА ЧТО ВСТАВЛЯТЬ (2 способа — выберите любой)
@@ -95,10 +97,17 @@ from FunPayAPI import Account, Runner, enums, exceptions, types
 FUNPAY_GOLDEN_KEY = "99n9ikgvdbnfzaob9txudaqq8vue0o5d"
 
 # токен сообщества ВК, от которого шлются уведомления
-VK_GROUP_TOKEN = "vk1.a.bh7sxx4bOc4oMKyzy1DGTlDzOT3qfOGQvB_lPDNZs5-kjmWD3YgY86XWT5nUzB30i_z8qPk1DdL7fYpGBPSwwoehKSfRdHV18MVFP2ttxIF-w0eQHF45p_IWxY1tjyDAcGi7WK_B5f_82WyrJfeKseJIPrwArE7ONifEm-5FJ9-7qlj2pVEBTxJ8ZCkk0RNoXJl5b5YIdXpWem711726WA"
+VK_GROUP_TOKEN = "vk1.a.bh7sxx4bOc4oMKyzy1DGTlDzOT3qfOGQvB_lPDNZs5-kjmWD3YgY86XWT5nUzB30i_z8qPk1DdL7fYpGBPSwwoehKSfRdHV18MVFP2ttxIF-w0eQHF45p_IWxY1tjyDAcGi7WK_B5f_82WyrJfeKseJIPrwArE7ONifEm-5FJ9-7qlj2pVEBTxJ8ZCkk0RNoXJl5b5YIdXpWem711726WA
 
 # ваш личный id ВК (число) — кому присылать уведомления
 VK_SELLER_ID = 875762552
+
+# автоматически поднимать предложения (лоты) на FunPay
+AUTO_RAISE = True
+
+# как часто поднимать лоты, в минутах
+# FunPay разрешает поднятие раз в 4 часа, поэтому 245 минут (4 ч 5 мин) — с запасом
+RAISE_INTERVAL_MINUTES = 245
 
 # =====================================================================
 #  БЛОК 2. СООБЩЕНИЯ ДЛЯ ПОКУПАТЕЛЯ (текст можно менять)
@@ -138,7 +147,7 @@ MSG_NEED_TEXT = "Напишите ваш ответ после +от. Напри
 
 NOTIFY_REPLY = "ответ от пользователя {link}, ({text})"           # на каждый «+от»
 NOTIFY_CALL = "вас вызывают ({link})"                              # на «+позвать»
-NOTIFY_PAID = "юзер оплатил заказ начните выполнять\n{link}"       # когда прислали username/ссылку
+NOTIFY_PAID = "юзер оплатил заказ начните выполнять\n{link}"       # системное уведомление FunPay о новом заказе
 
 # =====================================================================
 #  СЛУЖЕБНАЯ ЧАСТЬ — менять не нужно
@@ -201,7 +210,7 @@ def _is_placeholder(value):
 #   1 — поздоровались, ждём первый «+от»
 #   2 — спросили «готовый бот или код?», ждём второй «+от»
 #   3 — попросили оплатить и прислать ссылку/username
-#   4 — данные переданы продавцу
+#   4 — FunPay подтвердил оплату заказа (системное уведомление NEW_ORDER)
 
 _state_lock = threading.Lock()
 
@@ -321,18 +330,98 @@ def handle_message(acc, msg):
             funpay_send(acc, chat_id, MSG_PAY)
             set_stage(chat_id, 3)
         elif stage == 3:
-            # это ссылка на аккаунт / username, присланные через «+от»
-            vk_notify(NOTIFY_PAID.format(link=link))
-            funpay_send(acc, chat_id, MSG_DONE)
-            set_stage(chat_id, 4)
+            # покупатель прислал ссылку/username — продавцу она уже ушла выше.
+            # Оплату подтверждает только системное уведомление FunPay (NEW_ORDER),
+            # поэтому стадию здесь не меняем и NOTIFY_PAID не шлём.
+            pass
         # стадия 4: ответ просто ушёл продавцу, покупателю ничего не пишем
         return
 
-    # на стадии оплаты любое сообщение (ссылка/username) считаем передачей заказа
+    # на стадии оплаты обычное сообщение (ссылка/username) пересылаем продавцу,
+    # но оплатой его не считаем: ждём системное уведомление FunPay о заказе
     if stage == 3:
-        vk_notify(NOTIFY_PAID.format(link=link))
-        funpay_send(acc, chat_id, MSG_DONE)
-        set_stage(chat_id, 4)
+        vk_notify(NOTIFY_REPLY.format(link=link, text=text))
+
+
+def handle_order_event(acc, order):
+    """Реакция на системное уведомление FunPay о новом заказе (покупке).
+
+    Событие NEW_ORDER приходит от FunPay, когда покупатель оплатил заказ,
+    поэтому именно оно (а не сообщение покупателя) подтверждает оплату.
+    """
+    if order.status != enums.OrderStatuses.PAID:
+        log(f"💰 FunPay: заказ #{order.id} в статусе {order.status.name} — уведомление не нужно")
+        return
+
+    # ссылка на чат покупателя (если он писал боту), иначе — на его профиль
+    link = f"https://funpay.com/users/{order.buyer_id}/"
+    try:
+        chat = acc.get_chat_by_name(order.buyer_username, make_request=True)
+    except Exception as e:
+        chat = None
+        log("⚠ FunPay: не удалось найти чат покупателя —", e)
+
+    if chat:
+        link = f"https://funpay.com/chat/?node={chat.id}"
+        # если покупатель уже прошёл сценарий до просьбы оплатить — закрываем диалог
+        if get_stage(chat.id) == 3:
+            funpay_send(acc, chat.id, MSG_DONE)
+            set_stage(chat.id, 4)
+
+    log(f"💰 FunPay: оплачен заказ #{order.id} — {order.description} "
+        f"({order.price} ₽, {order.subcategory_name}), покупатель {order.buyer_username}")
+    vk_notify(NOTIFY_PAID.format(link=link))
+    _mark_order_seen(order.id)
+
+
+# ---------- память об уже обработанных заказах ----------
+def _orders_info():
+    with _state_lock:
+        return _read_state().get("_orders") or {}
+
+
+def _orders_ready():
+    return bool(_orders_info().get("ready"))
+
+
+def _set_orders_ready():
+    with _state_lock:
+        state = _read_state()
+        info = state.get("_orders") or {}
+        info["ready"] = True
+        state["_orders"] = info
+        _write_state(state)
+
+
+def _is_order_seen(order_id):
+    return str(order_id) in (_orders_info().get("seen") or [])
+
+
+def _mark_order_seen(order_id):
+    with _state_lock:
+        state = _read_state()
+        info = state.get("_orders") or {}
+        seen = [str(i) for i in (info.get("seen") or [])]
+        if str(order_id) not in seen:
+            seen.append(str(order_id))
+        info["seen"] = seen[-500:]   # храним последние 500 заказов
+        state["_orders"] = info
+        _write_state(state)
+
+
+def handle_initial_order(acc, order):
+    """Заказы, которые уже существовали на момент запуска бота.
+
+    При первом запуске просто запоминаем их, чтобы не спамить старыми
+    покупками. При следующих запусках заказы, сделанные пока бот не работал,
+    отсутствуют в памяти — о них уведомляем.
+    """
+    if not _orders_ready():
+        _mark_order_seen(order.id)
+        return
+    if _is_order_seen(order.id):
+        return
+    handle_order_event(acc, order)
 
 
 # ---------- подключение и главный цикл ----------
@@ -563,6 +652,83 @@ def new_runner(acc):
     return Runner(acc)
 
 
+# ---------- автоподнятие лотов ----------
+def _raise_info():
+    """Сохраняет время последнего/следующего поднятия в файле состояния."""
+    with _state_lock:
+        return _read_state().get("_raise") or {}
+
+
+def _set_raise_info(**kwargs):
+    with _state_lock:
+        state = _read_state()
+        info = state.get("_raise") or {}
+        info.update(kwargs)
+        state["_raise"] = info
+        _write_state(state)
+
+
+def my_lot_categories(acc):
+    """Возвращает категории (игры), в которых у аккаунта есть обычные лоты.
+
+    Формат: {ID категории: {"name": название, "subcategories": {ID: SubCategory}}}.
+    Подкатегории нужны, чтобы поднимать только те разделы, где есть лоты.
+    """
+    profile = acc.get_user(acc.id)
+    categories = {}
+    for lot in profile.get_lots():
+        sub = lot.subcategory
+        if sub.type is types.SubCategoryTypes.COMMON:
+            cat = categories.setdefault(sub.category.id,
+                                        {"name": sub.category.name, "subcategories": {}})
+            cat["subcategories"][sub.id] = sub
+    return categories
+
+
+def raise_all_lots(acc):
+    """Поднимает лоты во всех категориях. Возвращает паузу (сек) до следующей попытки."""
+    categories = my_lot_categories(acc)
+    if not categories:
+        log("⬆ Автоподнятие: активных лотов не найдено")
+        return RAISE_INTERVAL_MINUTES * 60
+
+    pause = 0
+    for cat_id, info in categories.items():
+        cat_name = info["name"]
+        try:
+            acc.raise_lots(cat_id, subcategories=list(info["subcategories"].values()))
+            log(f"⬆ Автоподнятие: лоты подняты — {cat_name} (категория {cat_id})")
+        except exceptions.RaiseError as e:
+            wait = e.wait_time or 0
+            log(f"⬆ Автоподнятие: {cat_name} — {e.error_message or 'поднять не удалось'}"
+                + (f", повтор через {wait} сек" if wait else ""))
+            pause = max(pause, wait)
+        except Exception as e:
+            log(f"⬆ Автоподнятие: ошибка в категории {cat_name} — {type(e).__name__}: {e}")
+            pause = max(pause, 600)
+
+    return pause or RAISE_INTERVAL_MINUTES * 60
+
+
+def maybe_raise_lots(acc):
+    """Вызывается из главного цикла: поднимает лоты, когда подошло время."""
+    if not AUTO_RAISE:
+        return
+    now = time.time()
+    next_ts = float(_raise_info().get("next") or 0)
+    if next_ts > now:
+        return
+    try:
+        pause = raise_all_lots(acc)
+    except Exception:
+        log("⬆ Автоподнятие: непредвиденная ошибка:", traceback.format_exc())
+        _set_raise_info(next=time.time() + 600)
+        return
+    now = time.time()
+    _set_raise_info(last=now, next=now + pause)
+    log(f"⬆ Автоподнятие: следующая попытка через {int(pause // 60)} мин")
+
+
 def main():
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -615,6 +781,7 @@ def main():
             f"и будет перезапущен следующим запуском")
 
     runner = new_runner(acc)
+    first_batch = True   # первый опрос: старые заказы только запоминаем
     while True:
         try:
             # Сами опрашиваем FunPay вместо runner.listen(): встроенный listen
@@ -624,17 +791,39 @@ def main():
             updates = runner.get_updates()
             events = runner.parse_updates(updates)
             for event in events:
-                if event.type is not enums.EventTypes.NEW_MESSAGE:
-                    continue
-                msg = event.message
-                if not msg or not (msg.text or "").strip():
-                    continue
-                if msg.by_bot or msg.author_id == acc.id:
-                    continue   # свои сообщения не обрабатываем
-                try:
-                    handle_message(acc, msg)
-                except Exception:
-                    log("Ошибка обработки сообщения:", traceback.format_exc())
+                if event.type is enums.EventTypes.NEW_MESSAGE:
+                    msg = event.message
+                    if not msg or not (msg.text or "").strip():
+                        continue
+                    if msg.by_bot or msg.author_id in (0, acc.id):
+                        continue   # свои и системные сообщения не обрабатываем
+                    try:
+                        handle_message(acc, msg)
+                    except Exception:
+                        log("Ошибка обработки сообщения:", traceback.format_exc())
+                elif event.type is enums.EventTypes.NEW_ORDER:
+                    # системное уведомление FunPay: покупатель оплатил заказ
+                    try:
+                        handle_order_event(acc, event.order)
+                    except Exception:
+                        log("Ошибка обработки заказа:", traceback.format_exc())
+                elif event.type is enums.EventTypes.INITIAL_ORDER:
+                    # заказы, существовавшие до запуска (в т.ч. сделанные,
+                    # пока бот был выключен) — уведомляем только о новых
+                    try:
+                        handle_initial_order(acc, event.order)
+                    except Exception:
+                        log("Ошибка обработки старого заказа:", traceback.format_exc())
+
+            if first_batch:
+                first_batch = False
+                _set_orders_ready()
+
+            # автоподнятие лотов (не чаще раза в RAISE_INTERVAL_MINUTES)
+            try:
+                maybe_raise_lots(acc)
+            except Exception:
+                log("Ошибка автоподнятия лотов:", traceback.format_exc())
         except KeyboardInterrupt:
             raise
         except exceptions.RequestFailedError as e:
