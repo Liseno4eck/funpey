@@ -53,8 +53,18 @@ Lisenok-FunPay — бот для FunPay с уведомлениями прода
 =====================================================================
   УСТАНОВКА И ЗАПУСК
 =====================================================================
-  pip install FunPayAPI vk_api
-  python funpay_bot.py
+  Локально (работает, пока включён компьютер):
+      pip install FunPayAPI vk_api
+      python funpay_bot.py
+
+  Через GitHub Actions (бесплатно, без своего сервера):
+      файл .github/workflows/bot.yml уже лежит в проекте — просто залейте
+      репозиторий на GitHub, добавьте секреты FUNPAY_GOLDEN_KEY,
+      VK_GROUP_TOKEN, VK_SELLER_ID (Settings -> Secrets and variables ->
+      Actions) и включите Actions. Workflow сам запускает бота каждые
+      5 часов и хранит состояние диалогов в кэше.
+      ВАЖНО: репозиторий должен быть ПУБЛИЧНЫМ, иначе бесплатные минуты
+      Actions кончатся меньше чем за двое суток.
 
 =====================================================================
   ТЕКСТЫ — меняйте под себя в блоках 2 и 3, ничего не сломается.
@@ -223,6 +233,12 @@ def set_stage(chat_id, stage):
         _write_state(state)
 
 
+def _ensure_state_file():
+    """Создаёт пустой файл состояния, если его ещё нет (нужно для кэша на GitHub)."""
+    if not os.path.exists(STATE_FILE):
+        _write_state({})
+
+
 # ---------- ВК ----------
 _vk_api = None
 _vk_lock = threading.Lock()
@@ -353,6 +369,29 @@ def main():
     acc = connect_funpay()
     if acc is None:
         return
+
+    # состояние диалогов: если файла ещё нет — создаём, чтобы он точно попал в кэш
+    _ensure_state_file()
+
+    # На GitHub Actions одна задача живёт максимум 6 часов, поэтому workflow
+    # задаёт RUN_MINUTES=330: бот сам аккуратно завершится до этого лимита,
+    # а следующий запуск поднимет его снова. Локально переменная не задана —
+    # бот работает без ограничений по времени.
+    try:
+        run_minutes = int(os.environ.get("RUN_MINUTES") or 0)
+    except ValueError:
+        run_minutes = 0
+    if run_minutes > 0:
+        def _time_to_restart():
+            log(f"⏳ Лимит запуска ({run_minutes} мин) достигнут — завершаюсь, "
+                f"следующий запуск поднимет бота заново")
+            os._exit(0)   # код 0 = успех: workflow сохранит кэш и перезапустит бота
+
+        timer = threading.Timer(run_minutes * 60, _time_to_restart)
+        timer.daemon = True
+        timer.start()
+        log(f"⏱ Бот завершится сам через {run_minutes} мин (лимит GitHub Actions) "
+            f"и будет перезапущен следующим запуском")
 
     runner = None
     while True:
