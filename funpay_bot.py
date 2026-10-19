@@ -72,6 +72,7 @@ Lisenok-FunPay — бот для FunPay с уведомлениями прода
 """
 
 import json
+import logging
 import os
 import re
 import sys
@@ -360,6 +361,13 @@ def main():
     except Exception:
         pass
 
+    # Логи библиотеки FunPayAPI тоже выводим в консоль: при проблемах со связью
+    # там будет видна причина. Для подробных трейсбеков задайте FUNPAY_DEBUG=1.
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+    if os.environ.get("FUNPAY_DEBUG") == "1":
+        logging.getLogger("FunPayAPI").setLevel(logging.DEBUG)
+
     if _is_placeholder(FUNPAY_GOLDEN_KEY):
         print("❌ Впишите FUNPAY_GOLDEN_KEY в БЛОК 1 (или задайте переменную окружения).")
         return
@@ -393,14 +401,16 @@ def main():
         log(f"⏱ Бот завершится сам через {run_minutes} мин (лимит GitHub Actions) "
             f"и будет перезапущен следующим запуском")
 
-    runner = None
+    runner = new_runner(acc)
     while True:
         try:
-            if runner is None:
-                runner = new_runner(acc)
-            # listen опрашивает FunPay каждые REQUEST_DELAY секунд и сам глотает
-            # ошибки сети — поэтому бот работает круглосуточно без падений
-            for event in runner.listen(requests_delay=REQUEST_DELAY, ignore_exceptions=True):
+            # Сами опрашиваем FunPay вместо runner.listen(): встроенный listen
+            # прячет настоящую причину ошибки под общей фразой «Произошла ошибка
+            # при получении событий». Так в лог попадает точная ошибка (код 403,
+            # Unauthorized и т.п.), по которой сразу видно, что чинить.
+            updates = runner.get_updates()
+            events = runner.parse_updates(updates)
+            for event in events:
                 if event.type is not enums.EventTypes.NEW_MESSAGE:
                     continue
                 msg = event.message
@@ -412,10 +422,15 @@ def main():
                     handle_message(acc, msg)
                 except Exception:
                     log("Ошибка обработки сообщения:", traceback.format_exc())
-        except Exception:
-            log("⚠ Слушатель упал, перезапуск через 10 сек:", traceback.format_exc())
-            runner = None
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            # runner НЕ пересоздаём: у него внутри хранится состояние чатов,
+            # иначе часть сообщений можно потерять. Просто ждём и пробуем снова.
+            log(f"⚠ Ошибка получения событий FunPay: {type(e).__name__}: {e}")
+            log(traceback.format_exc())
             time.sleep(10)
+        time.sleep(REQUEST_DELAY)
 
 
 if __name__ == "__main__":
