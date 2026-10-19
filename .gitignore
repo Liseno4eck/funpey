@@ -1,0 +1,11 @@
+# секреты и данные, которые НЕ должны попасть на GitHub
+.env
+funpay_bot.log
+funpay_state.json
+funpay_state.json.tmp
+
+# служебное
+__pycache__/
+*.pyc
+.venv/
+venv/
