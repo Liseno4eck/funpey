@@ -82,7 +82,8 @@ import traceback
 
 import requests
 import vk_api
-from FunPayAPI import Account, Runner, enums, exceptions
+from bs4 import BeautifulSoup
+from FunPayAPI import Account, Runner, enums, exceptions, types
 
 # =====================================================================
 #  БЛОК 1. НАСТРОЙКИ — КУДА ВСТАВЛЯТЬ ВАШИ ДАННЫЕ
@@ -385,6 +386,149 @@ def patch_funpay_golden_seal():
     Account.method = method
 
 
+def _msg_text(parser):
+    """Текст сообщения: FunPay отдаёт div.chat-msg-text, старый класс — message-text."""
+    node = (parser.find("div", {"class": "chat-msg-text"})
+            or parser.find("div", {"class": "message-text"}))
+    return node.get_text() if node else ""
+
+
+def patch_funpay_parsing():
+    """FunPay переименовал класс текста сообщения: message-text -> chat-msg-text.
+
+    FunPayAPI 1.1.0 (2023) ищет старый класс, получает None и падает с
+    AttributeError. Runner 3 раза повторяет запрос и сдаётся, поэтому бот
+    вообще не видит сообщения покупателей. Подменяем два метода библиотеки
+    на такие же, но с поиском обоих классов.
+    """
+    if getattr(Account, "_lisenok_text_patch", False):
+        return
+
+    def parse_messages(self, json_messages, chat_id, interlocutor_id=None,
+                       interlocutor_username=None, from_id=0):
+        messages = []
+        ids = {self.id: self.username, 0: "FunPay"}
+        badges = {}
+        if interlocutor_id is not None:
+            ids[interlocutor_id] = interlocutor_username
+        bot_char = getattr(self, "_Account__bot_character", "\u2064")
+
+        for i in json_messages:
+            if i["id"] < from_id:
+                continue
+            author_id = i["author"]
+            parser = BeautifulSoup(i["html"], "html.parser")
+
+            # ник и бейдж автора, если ещё не знаем
+            if (None in (ids.get(author_id), badges.get(author_id))
+                    and (author_div := parser.find("div", {"class": "media-user-name"}))):
+                if badges.get(author_id) is None:
+                    badge = author_div.find("span")
+                    badges[author_id] = badge.text if badge else 0
+                if ids.get(author_id) is None:
+                    author_link = author_div.find("a")
+                    if author_link:
+                        author = author_link.text.strip()
+                        ids[author_id] = author
+                        if (Account.chat_id_private(chat_id) and author_id == interlocutor_id
+                                and not interlocutor_username):
+                            interlocutor_username = author
+                            ids[interlocutor_id] = interlocutor_username
+
+            image_link = parser.find("a", {"class": "chat-img-link"})
+            if image_link:
+                image_link = image_link.get("href")
+                message_text = None
+            else:
+                image_link = None
+                if author_id == 0:   # системное сообщение FunPay
+                    alert = parser.find("div", {"class": "alert alert-with-icon alert-info"})
+                    message_text = alert.get_text().strip() if alert else _msg_text(parser).strip()
+                else:
+                    message_text = _msg_text(parser)
+
+            by_bot = False
+            if not image_link and message_text.startswith(bot_char):
+                message_text = message_text.replace(bot_char, "", 1)
+                by_bot = True
+
+            message_obj = types.Message(i["id"], message_text, chat_id, interlocutor_username,
+                                        None, author_id, i["html"], image_link,
+                                        determine_msg_type=False)
+            message_obj.by_bot = by_bot
+            message_obj.type = (types.MessageTypes.NON_SYSTEM if author_id != 0
+                                else message_obj.get_message_type())
+            messages.append(message_obj)
+
+        for i in messages:
+            i.author = ids.get(i.author_id)
+            i.chat_name = interlocutor_username
+            i.badge = badges.get(i.author_id) if badges.get(i.author_id) != 0 else None
+        return messages
+
+    def send_message(self, chat_id, text=None, chat_name=None, image_id=None,
+                     add_to_ignore_list=True, update_last_saved_message=False):
+        if not self.is_initiated:
+            raise exceptions.AccountNotInitiatedError()
+
+        headers = {
+            "accept": "*/*",
+            "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "x-requested-with": "XMLHttpRequest",
+        }
+        request = {
+            "action": "chat_message",
+            "data": {"node": chat_id, "last_message": -1, "content": text},
+        }
+        bot_char = getattr(self, "_Account__bot_character", "\u2064")
+
+        if image_id is not None:
+            request["data"]["image_id"] = image_id
+            request["data"]["content"] = ""
+        else:
+            request["data"]["content"] = f"{bot_char}{text}" if text else ""
+
+        objects = [{
+            "type": "chat_node",
+            "id": chat_id,
+            "tag": "00000000",
+            "data": {"node": chat_id, "last_message": -1, "content": ""},
+        }]
+        payload = {
+            "objects": json.dumps(objects),
+            "request": json.dumps(request),
+            "csrf_token": self.csrf_token,
+        }
+
+        response = self.method("post", "runner/", headers, payload, raise_not_200=True)
+        json_response = response.json()
+        if not (resp := json_response.get("response")):
+            raise exceptions.MessageNotDeliveredError(response, None, chat_id)
+        if (error_text := resp.get("error")) is not None:
+            raise exceptions.MessageNotDeliveredError(response, error_text, chat_id)
+
+        mes = json_response["objects"][0]["data"]["messages"][-1]
+        parser = BeautifulSoup(mes["html"], "html.parser")
+        if image_link := parser.find("a", {"class": "chat-img-link"}):
+            image_link = image_link.get("href")
+            message_text = None
+        else:
+            message_text = _msg_text(parser).replace(bot_char, "", 1)
+
+        message_obj = types.Message(int(mes["id"]), message_text, chat_id, chat_name,
+                                    self.username, self.id, mes["html"], image_link)
+        if self.runner and isinstance(chat_id, int):
+            if add_to_ignore_list:
+                self.runner.mark_as_by_bot(chat_id, message_obj.id)
+            if update_last_saved_message:
+                self.runner.update_last_message(chat_id, message_text)
+        return message_obj
+
+    Account._Account__parse_messages = parse_messages
+    Account.send_message = send_message
+    Account._lisenok_text_patch = True
+
+
 def connect_funpay():
     """Входит в FunPay. При ошибках сети повторяет попытки, пока не получится."""
     while True:
@@ -440,6 +584,8 @@ def main():
 
     # без этого патча FunPay отвечает 400 «Необходимая cookie отсутствует или устарела»
     patch_funpay_golden_seal()
+    # без этого бот не видит текстовые сообщения (класс chat-msg-text)
+    patch_funpay_parsing()
 
     acc = connect_funpay()
     if acc is None:
