@@ -97,7 +97,7 @@ from FunPayAPI import Account, Runner, enums, exceptions, types
 FUNPAY_GOLDEN_KEY = "99n9ikgvdbnfzaob9txudaqq8vue0o5d"
 
 # токен сообщества ВК, от которого шлются уведомления
-VK_GROUP_TOKEN = "vk1.a.bh7sxx4bOc4oMKyzy1DGTlDzOT3qfOGQvB_lPDNZs5-kjmWD3YgY86XWT5nUzB30i_z8qPk1DdL7fYpGBPSwwoehKSfRdHV18MVFP2ttxIF-w0eQHF45p_IWxY1tjyDAcGi7WK_B5f_82WyrJfeKseJIPrwArE7ONifEm-5FJ9-7qlj2pVEBTxJ8ZCkk0RNoXJl5b5YIdXpWem711726WA
+VK_GROUP_TOKEN = "vk1.a.bh7sxx4bOc4oMKyzy1DGTlDzOT3qfOGQvB_lPDNZs5-kjmWD3YgY86XWT5nUzB30i_z8qPk1DdL7fYpGBPSwwoehKSfRdHV18MVFP2ttxIF-w0eQHF45p_IWxY1tjyDAcGi7WK_B5f_82WyrJfeKseJIPrwArE7ONifEm-5FJ9-7qlj2pVEBTxJ8ZCkk0RNoXJl5b5YIdXpWem711726WA"
 
 # ваш личный id ВК (число) — кому присылать уведомления
 VK_SELLER_ID = 875762552
