@@ -80,6 +80,7 @@ import threading
 import time
 import traceback
 
+import requests
 import vk_api
 from FunPayAPI import Account, Runner, enums, exceptions
 
@@ -334,12 +335,64 @@ def handle_message(acc, msg):
 
 
 # ---------- подключение и главный цикл ----------
+def patch_funpay_golden_seal():
+    """FunPay с 2026 года требует cookie golden_seal, которой нет в FunPayAPI 1.1.0.
+
+    Без неё сайт отвечает на /runner/: 400
+    {"msg":"Необходимая cookie отсутствует или устарела. Повторите запрос.","error":1}
+
+    Патчим Account.method: отправляем golden_seal вместе с golden_key/PHPSESSID
+    и запоминаем новое значение из каждого ответа (FunPay может его обновлять).
+    """
+    original = Account.method
+    if getattr(original, "_lisenok_golden_seal", False):
+        return
+
+    def method(self, request_method, api_method, headers, payload,
+               exclude_phpsessid=False, raise_not_200=False):
+        headers = dict(headers)
+        parts = [f"golden_key={self.golden_key}"]
+        if self.phpsessid and not exclude_phpsessid:
+            parts.append(f"PHPSESSID={self.phpsessid}")
+        seal = getattr(self, "_golden_seal", None)
+        if seal:
+            parts.append(f"golden_seal={seal}")
+        headers["cookie"] = "; ".join(parts)
+        if self.user_agent:
+            headers["user-agent"] = self.user_agent
+
+        link = (api_method if api_method.startswith("https://funpay.com")
+                else "https://funpay.com/" + api_method)
+        response = getattr(requests, request_method)(
+            link, headers=headers, data=payload,
+            timeout=self.requests_timeout, proxies=self.proxy or {})
+
+        # сохраняем/обновляем golden_seal из ответа
+        try:
+            jar = response.cookies.get_dict()
+            if jar.get("golden_seal"):
+                self._golden_seal = jar["golden_seal"]
+        except Exception:
+            pass
+
+        if response.status_code == 403:
+            raise exceptions.UnauthorizedError(response)
+        elif response.status_code != 200 and raise_not_200:
+            raise exceptions.RequestFailedError(response)
+        return response
+
+    method._lisenok_golden_seal = True
+    Account.method = method
+
+
 def connect_funpay():
     """Входит в FunPay. При ошибках сети повторяет попытки, пока не получится."""
     while True:
         try:
             acc = Account(FUNPAY_GOLDEN_KEY).get()
             log(f"✅ FunPay: вошли как {acc.username} (id {acc.id}). Бот в сети 24/7.")
+            if not getattr(acc, "_golden_seal", None):
+                log("⚠ FunPay: cookie golden_seal не получена — возможны ошибки 400")
             return acc
         except exceptions.AccountNotInitiatedError:
             log("❌ FunPay: golden_key не подошёл. Проверьте FUNPAY_GOLDEN_KEY в настройках.")
@@ -347,6 +400,17 @@ def connect_funpay():
         except Exception as e:
             log(f"⚠ FunPay: ошибка входа ({e}) — повтор через 15 сек")
             time.sleep(15)
+
+
+def refresh_session(acc):
+    """Обновляет PHPSESSID и golden_seal (когда FunPay пишет, что cookie устарела)."""
+    try:
+        acc.get()
+        log("🔄 FunPay: сессия и cookie обновлены")
+        return True
+    except Exception as e:
+        log("⚠ FunPay: не удалось обновить сессию —", e)
+        return False
 
 
 def new_runner(acc):
@@ -373,6 +437,9 @@ def main():
         return
     if _is_placeholder(VK_GROUP_TOKEN) or not VK_SELLER_ID:
         log("⚠ ВК: не заполнены VK_GROUP_TOKEN / VK_SELLER_ID — уведомления продавцу работать не будут.")
+
+    # без этого патча FunPay отвечает 400 «Необходимая cookie отсутствует или устарела»
+    patch_funpay_golden_seal()
 
     acc = connect_funpay()
     if acc is None:
@@ -424,11 +491,21 @@ def main():
                     log("Ошибка обработки сообщения:", traceback.format_exc())
         except KeyboardInterrupt:
             raise
+        except exceptions.RequestFailedError as e:
+            body = ""
+            try:
+                body = e.response.content.decode("utf-8", "replace")
+            except Exception:
+                pass
+            log(f"⚠ FunPay: код {e.status_code}: {body[:300]}")
+            # FunPay пишет «cookie отсутствует или устарела» — обновляем сессию
+            if e.status_code == 400 and "cookie" in body.lower():
+                refresh_session(acc)
+            time.sleep(10)
         except Exception as e:
             # runner НЕ пересоздаём: у него внутри хранится состояние чатов,
             # иначе часть сообщений можно потерять. Просто ждём и пробуем снова.
             log(f"⚠ Ошибка получения событий FunPay: {type(e).__name__}: {e}")
-            log(traceback.format_exc())
             time.sleep(10)
         time.sleep(REQUEST_DELAY)
 
