@@ -1,0 +1,72 @@
+# Запуск FunPay-бота на серверах GitHub (GitHub Actions) — бесплатно и без VPS.
+#
+# Одна задача GitHub живёт максимум 6 часов, поэтому бот сам завершается
+# через 5.5 часов (RUN_MINUTES=330), а следующий запуск поднимает его заново.
+# Запуски идут каждые 5 часов, поэтому пока один работает — следующий уже
+# стоит в очереди, и работа получается практически непрерывной.
+#
+# Куда что вставлять:
+#   1. Залейте этот файл в репозиторий по пути .github/workflows/bot.yml
+#   2. Откройте: GitHub -> ваш репозиторий -> Settings -> Secrets and variables -> Actions
+#      -> New repository secret. Создайте три секрета:
+#         FUNPAY_GOLDEN_KEY  — golden_key с funpay.com
+#         VK_GROUP_TOKEN     — токен сообщества ВК
+#         VK_SELLER_ID       — ваш числовой id ВК (например 123456789)
+#   3. Репозиторий должен быть ПУБЛИЧНЫМ (иначе бесплатные минуты Actions
+#      закончатся меньше чем за двое суток).
+#   4. Вкладка Actions -> FunPay Bot -> Run workflow (кнопка ручного запуска).
+
+name: FunPay Bot
+
+on:
+  # каждые 5 часов (в 00:00, 05:00, 10:00, 15:00, 20:00 UTC)
+  schedule:
+    - cron: "0 */5 * * *"
+  # кнопка ручного запуска во вкладке Actions
+  workflow_dispatch:
+
+# одновременно работает только один экземпляр бота;
+# следующий запуск дожидается окончания текущего и стартует сразу после него
+concurrency:
+  group: funpay-bot
+  cancel-in-progress: false
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355   # жёсткий предел GitHub — 360 минут
+
+    steps:
+      - name: Скачиваем код репозитория
+        uses: actions/checkout@v4
+
+      - name: Ставим Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Ставим библиотеки
+        run: pip install -r requirements.txt
+
+      - name: Восстанавливаем состояние диалогов из кэша
+        uses: actions/cache/restore@v4
+        with:
+          path: funpay_state.json
+          key: funpay-state-${{ github.run_id }}
+          restore-keys: |
+            funpay-state-
+
+      - name: Запускаем бота (до 5.5 часов)
+        env:
+          FUNPAY_GOLDEN_KEY: ${{ secrets.FUNPAY_GOLDEN_KEY }}
+          VK_GROUP_TOKEN: ${{ secrets.VK_GROUP_TOKEN }}
+          VK_SELLER_ID: ${{ secrets.VK_SELLER_ID }}
+          RUN_MINUTES: "330"
+        run: python funpay_bot.py
+
+      - name: Сохраняем состояние диалогов в кэш
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: funpay_state.json
+          key: funpay-state-${{ github.run_id }}
